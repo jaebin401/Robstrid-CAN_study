@@ -35,11 +35,10 @@
 const char* CAN_INTERFACE = "can0";
 const int HOST_ID = 0xFD; 
 
-const int NUM_MOTORS = 1;
 const int MOTOR_ID = 127;
 
 const double MAX_SPEED_DEG_PER_SEC = 500.0; 
-const double STEP_DEG = 1.0; 
+const double STEP_DEG = 2.0; 
 
 const double DEFAULT_MIN_LIMIT = -900.0;
 const double DEFAULT_MAX_LIMIT = 900.0;
@@ -199,28 +198,6 @@ void control_loop(int s) {
         loop_count++;
         
         // 1. Send Commands
-        // for (int i = 0; i < NUM_MOTORS; i++) {
-        //     MotorState* m = motors[i];
-            
-        //     if (m->is_enabled) {
-        //         double target = m->final_target_pos.load();
-        //         double current = m->current_setpoint;
-        //         double diff = target - current;
-
-        //         if (std::abs(diff) > max_step_rad) {
-        //             if (diff > 0) m->current_setpoint += max_step_rad;
-        //             else          m->current_setpoint -= max_step_rad;
-        //         } else {
-        //             m->current_setpoint = target;
-        //         }
-        //         write_operation_frame(s, m->id, m->current_setpoint, m->kp.load(), m->kd.load());
-        //     } 
-            
-        //     if (loop_count % 5 == 0) {
-        //         send_read_param(s, m->id, IDX_MECH_POS);
-        //     }
-        //     std::this_thread::sleep_for(std::chrono::microseconds(50)); 
-        // }
         
         MotorState* m = motor;
             
@@ -258,12 +235,6 @@ void control_loop(int s) {
                 
                 if (type == COMM_READ_PARAM) {
                     uint32_t src_id = (frame.can_id >> 8) & 0xFF; 
-                    // for(int i=0; i<NUM_MOTORS; i++) {
-                    //     if ((uint32_t)motors[i]->id == src_id) {
-                    //         float val = unpack_float_le(&frame.data[4]);
-                    //         motors[i]->real_pos = (double)val;
-                    //     }
-                    // }
                     
                     if ((uint32_t)motor->id == src_id) {
                         float val = unpack_float_le(&frame.data[4]);
@@ -280,14 +251,6 @@ void control_loop(int s) {
         // 3. Print Status (Only when monitor is active)
         if (monitor_active) {
             std::cout << "\r\033[K[KEY] "; // \033[K : Clear line from cursor
-            // for(int i=0; i<NUM_MOTORS; i++) {
-            //     double tgt_deg = motors[i]->final_target_pos.load() * 180.0 / M_PI;
-            //     double act_deg = motors[i]->real_pos * 180.0 / M_PI;
-            //     std::string status_color = motors[i]->is_enabled ? "\033[32mON \033[0m" : "\033[31mOFF\033[0m"; 
-            //     std::cout << "ID:" << motors[i]->id << " " << status_color
-            //               << " T:" << std::fixed << std::setprecision(1) << std::setw(6) << tgt_deg
-            //               << " A:" << std::fixed << std::setprecision(1) << std::setw(6) << act_deg << " | ";
-            // }
             
             double tgt_deg = motor->final_target_pos.load() * 180.0 / M_PI;
             double act_deg = motor->real_pos * 180.0 / M_PI;
