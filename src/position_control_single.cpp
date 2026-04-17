@@ -37,7 +37,7 @@ const int HOST_ID = 0xFD;
 
 const int NUM_MOTORS = 1;
 const int MOTOR_IDS[NUM_MOTORS] = {127}; 
-// const int MOTOR_ID = 127;
+const int MOTOR_ID = 127;
 
 const double MAX_SPEED_DEG_PER_SEC = 500.0; 
 const double STEP_DEG = 2.0; 
@@ -200,28 +200,51 @@ void control_loop(int s) {
         loop_count++;
         
         // 1. Send Commands
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            MotorState* m = motors[i];
+        // for (int i = 0; i < NUM_MOTORS; i++) {
+        //     MotorState* m = motors[i];
             
-            if (m->is_enabled) {
-                double target = m->final_target_pos.load();
-                double current = m->current_setpoint;
-                double diff = target - current;
+        //     if (m->is_enabled) {
+        //         double target = m->final_target_pos.load();
+        //         double current = m->current_setpoint;
+        //         double diff = target - current;
 
-                if (std::abs(diff) > max_step_rad) {
-                    if (diff > 0) m->current_setpoint += max_step_rad;
-                    else          m->current_setpoint -= max_step_rad;
-                } else {
-                    m->current_setpoint = target;
-                }
-                write_operation_frame(s, m->id, m->current_setpoint, m->kp.load(), m->kd.load());
-            } 
+        //         if (std::abs(diff) > max_step_rad) {
+        //             if (diff > 0) m->current_setpoint += max_step_rad;
+        //             else          m->current_setpoint -= max_step_rad;
+        //         } else {
+        //             m->current_setpoint = target;
+        //         }
+        //         write_operation_frame(s, m->id, m->current_setpoint, m->kp.load(), m->kd.load());
+        //     } 
             
-            if (loop_count % 5 == 0) {
-                send_read_param(s, m->id, IDX_MECH_POS);
+        //     if (loop_count % 5 == 0) {
+        //         send_read_param(s, m->id, IDX_MECH_POS);
+        //     }
+        //     std::this_thread::sleep_for(std::chrono::microseconds(50)); 
+        // }
+        
+        MotorState* m = motor;
+            
+        if (m->is_enabled) {
+            double target = m->final_target_pos.load();
+            double current = m->current_setpoint;
+            double diff = target - current;
+
+            if (std::abs(diff) > max_step_rad) {
+                if (diff > 0) m->current_setpoint += max_step_rad;
+                else          m->current_setpoint -= max_step_rad;
+            } else {
+                m->current_setpoint = target;
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(50)); 
+            write_operation_frame(s, m->id, m->current_setpoint, m->kp.load(), m->kd.load());
+        } 
+        
+        if (loop_count % 5 == 0) {
+            send_read_param(s, m->id, IDX_MECH_POS);
         }
+        std::this_thread::sleep_for(std::chrono::microseconds(50)); 
+        
+
         
         // 2. Read Incoming Frames
         struct can_frame frame;
@@ -236,12 +259,18 @@ void control_loop(int s) {
                 
                 if (type == COMM_READ_PARAM) {
                     uint32_t src_id = (frame.can_id >> 8) & 0xFF; 
-                    for(int i=0; i<NUM_MOTORS; i++) {
-                        if ((uint32_t)motors[i]->id == src_id) {
-                            float val = unpack_float_le(&frame.data[4]);
-                            motors[i]->real_pos = (double)val;
-                        }
+                    // for(int i=0; i<NUM_MOTORS; i++) {
+                    //     if ((uint32_t)motors[i]->id == src_id) {
+                    //         float val = unpack_float_le(&frame.data[4]);
+                    //         motors[i]->real_pos = (double)val;
+                    //     }
+                    // }
+                    
+                    if ((uint32_t)motor->id == src_id) {
+                        float val = unpack_float_le(&frame.data[4]);
+                        motor->real_pos = (double)val;
                     }
+                    
                 }
             }
             FD_ZERO(&rdfs);
@@ -252,14 +281,21 @@ void control_loop(int s) {
         // 3. Print Status (Only when monitor is active)
         if (monitor_active) {
             std::cout << "\r\033[K[KEY] "; // \033[K : Clear line from cursor
-            for(int i=0; i<NUM_MOTORS; i++) {
-                double tgt_deg = motors[i]->final_target_pos.load() * 180.0 / M_PI;
-                double act_deg = motors[i]->real_pos * 180.0 / M_PI;
-                std::string status_color = motors[i]->is_enabled ? "\033[32mON \033[0m" : "\033[31mOFF\033[0m"; 
-                std::cout << "ID:" << motors[i]->id << " " << status_color
-                          << " T:" << std::fixed << std::setprecision(1) << std::setw(6) << tgt_deg
-                          << " A:" << std::fixed << std::setprecision(1) << std::setw(6) << act_deg << " | ";
-            }
+            // for(int i=0; i<NUM_MOTORS; i++) {
+            //     double tgt_deg = motors[i]->final_target_pos.load() * 180.0 / M_PI;
+            //     double act_deg = motors[i]->real_pos * 180.0 / M_PI;
+            //     std::string status_color = motors[i]->is_enabled ? "\033[32mON \033[0m" : "\033[31mOFF\033[0m"; 
+            //     std::cout << "ID:" << motors[i]->id << " " << status_color
+            //               << " T:" << std::fixed << std::setprecision(1) << std::setw(6) << tgt_deg
+            //               << " A:" << std::fixed << std::setprecision(1) << std::setw(6) << act_deg << " | ";
+            // }
+            
+            double tgt_deg = motor->final_target_pos.load() * 180.0 / M_PI;
+            double act_deg = motor->real_pos * 180.0 / M_PI;
+            std::string status_color = motor->is_enabled ? "\033[32mON \033[0m" : "\033[31mOFF\033[0m"; 
+            std::cout << "ID:" << motor->id << " " << status_color
+                      << " T:" << std::fixed << std::setprecision(1) << std::setw(6) << tgt_deg
+                      << " A:" << std::fixed << std::setprecision(1) << std::setw(6) << act_deg << " | ";
             std::cout << std::flush;
         }
         
@@ -290,8 +326,7 @@ void signal_handler(int signum) {
 }
 
 int main() {
-    for(int i=0; i<NUM_MOTORS; i++) motors[i] = new MotorState(MOTOR_IDS[i]);
-    //motor = new MotorState(MOTOR_ID);
+    motor = new MotorState(MOTOR_ID);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -300,20 +335,10 @@ int main() {
     if (s < 0) return 1;
 
     // Startup
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        stop_motor(s, motors[i]->id);
-        send_read_param(s, motors[i]->id, IDX_MECH_POS);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-
-    /*
-    
     stop_motor(s, motor->id);
     send_read_param(s, motor->id, IDX_MECH_POS);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
 
-    */
     std::thread t(control_loop, s);
 
     std::cout << "========================================" << std::endl;
@@ -330,7 +355,7 @@ int main() {
             if (key == ' ') { 
                 // Toggle Logic based on first motor
                 bool to_enable = !motors[0]->is_enabled;
-                /*
+            
                 if(to_enable) {
                     motor->current_setpoint = motor->real_pos;
                     motor->final_target_pos = motor->real_pos;
@@ -340,17 +365,7 @@ int main() {
                     stop_motor(s, motor->id);
                 }
                 motor->is_enabled = to_enable;
-            */
-                for(int i=0; i<NUM_MOTORS; i++) {
-                    if(to_enable) {
-                        motors[i]->current_setpoint = motors[i]->real_pos;
-                        motors[i]->final_target_pos = motors[i]->real_pos;
-                        enable_motor(s, motors[i]->id);
-                    } else {
-                        stop_motor(s, motors[i]->id);
-                    }
-                    motors[i]->is_enabled = to_enable;
-                }
+                
             }
             // 2. Quit (Q)
             else if (key == 'q' || key == 'Q') {
@@ -372,10 +387,8 @@ int main() {
                     double temp;
                     while (ss >> temp) inputs.push_back(temp);
                     
-                    if (inputs.size() == NUM_MOTORS) {
-                        for(int i=0; i<NUM_MOTORS; i++) {
-                            if(motors[i]->is_enabled) motors[i]->final_target_pos = inputs[i] * M_PI / 180.0;
-                        }
+                    if (inputs.size() == 1) {
+                        if(motor->is_enabled) motor->final_target_pos = inputs[0] * M_PI / 180.0;
                         std::cout << " -> Moved." << std::endl;
                     } else {
                         std::cout << " -> Invalid Input." << std::endl;
@@ -389,18 +402,10 @@ int main() {
                 monitor_active = true;
             }
             // 4. Direct Control
-            else if (motors[0]->is_enabled || motors[1]->is_enabled) {
-                if (key == 'w' || key == 'W') motors[0]->final_target_pos = motors[0]->final_target_pos.load() + step_rad;
-                if (key == 's' || key == 'S') motors[0]->final_target_pos = motors[0]->final_target_pos.load() - step_rad;
+            else if (motor->is_enabled) {
+                if (key == 'w' || key == 'W') motor->final_target_pos = motor->final_target_pos.load() + step_rad;
+                if (key == 's' || key == 'S') motor->final_target_pos = motor->final_target_pos.load() - step_rad;
                 
-                if (key == 'e' || key == 'E') motors[1]->final_target_pos = motors[1]->final_target_pos.load() + step_rad;
-                if (key == 'd' || key == 'D') motors[1]->final_target_pos = motors[1]->final_target_pos.load() - step_rad;
-
-                if (key == 'r' || key == 'R') motors[2]->final_target_pos = motors[2]->final_target_pos.load() + step_rad;
-                if (key == 'f' || key == 'F') motors[2]->final_target_pos = motors[2]->final_target_pos.load() - step_rad;
-                
-                if (key == 't' || key == 'T') motors[3]->final_target_pos = motors[3]->final_target_pos.load() + step_rad;
-                if (key == 'g' || key == 'G') motors[3]->final_target_pos = motors[3]->final_target_pos.load() - step_rad;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -409,7 +414,7 @@ int main() {
     reset_terminal_mode();
     if(t.joinable()) t.join();
     std::cout << "\n";
-    for (int i = 0; i < NUM_MOTORS; i++) stop_motor(s, motors[i]->id);
+    stop_motor(s, motor->id);
     close(s);
     return 0;
 }
