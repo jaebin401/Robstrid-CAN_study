@@ -36,7 +36,6 @@ const char* CAN_INTERFACE = "can0";
 const int HOST_ID = 0xFD; 
 
 const int NUM_MOTORS = 1;
-const int MOTOR_IDS[NUM_MOTORS] = {127}; 
 const int MOTOR_ID = 127;
 
 const double MAX_SPEED_DEG_PER_SEC = 500.0; 
