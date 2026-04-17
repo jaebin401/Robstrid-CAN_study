@@ -40,7 +40,7 @@ const int MOTOR_IDS[NUM_MOTORS] = {127};
 const int MOTOR_ID = 127;
 
 const double MAX_SPEED_DEG_PER_SEC = 500.0; 
-const double STEP_DEG = 2.0; 
+const double STEP_DEG = 1.0; 
 
 const double DEFAULT_MIN_LIMIT = -900.0;
 const double DEFAULT_MAX_LIMIT = 900.0;
@@ -62,10 +62,10 @@ struct MotorState {
     MotorState(int motor_id) 
         : id(motor_id), final_target_pos(0.0), current_setpoint(0.0), 
           real_pos(0.0), is_enabled(false),
-          kp(40.0), kd(5) {}
+          kp(40.0), kd(5.0) {}
 };
 
-MotorState* motors[NUM_MOTORS]; 
+MotorState* motor; 
 std::atomic<bool> running(true);
 // 화면 출력 제어용 (명령어 입력 중에는 모니터링 출력 일시 정지)
 std::atomic<bool> monitor_active(true); 
@@ -354,7 +354,7 @@ int main() {
             // 1. Toggle Enable (Space)
             if (key == ' ') { 
                 // Toggle Logic based on first motor
-                bool to_enable = !motors[0]->is_enabled;
+                bool to_enable = !motor->is_enabled;
             
                 if(to_enable) {
                     motor->current_setpoint = motor->real_pos;
