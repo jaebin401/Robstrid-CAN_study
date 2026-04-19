@@ -3,16 +3,17 @@
 현재 robstride 액추에이터 can0 채널 하나에서 컨트롤 까지 구현
 향후 ros2 연동, ptrhead 구현까지
 
-[변경사항] position_control_single.cpp 에서 복제 → CSP 모드로 전환
+[변경사항] position_control_single.cpp → CSP 모드 + 런타임 튜닝 기능
 - 제어 방식: Operation mode (Type 1) → CSP mode (Type 18, runmode=5)
-- write_operation_frame() 제거
-- write_param_float(), write_param_uint8() 추가 (Type 18 파라미터 write)
-- startup 시퀀스에서 runmode=5, limit_spd, limit_cur, loc_kp 설정
-- control_loop에서 매 주기 loc_ref만 write (궤적 생성은 상위에서 담당)
-- MotorState에서 kp, kd 제거 → loc_kp, limit_spd, limit_cur 추가
-- 기존 소프트 램프(current_setpoint 슬라이딩) 유지
-  → 모터 내부 위치 루프가 있어도 급격한 목표 변화는 limit_spd로 제한되므로
-     상위에서 부드럽게 넘겨주는 것이 더 안전함
+- 런타임 파라미터 변경: / 커맨드로 재컴파일 없이 즉시 적용
+  kp <val>      : loc_kp (위치 루프 P gain)
+  spd <val>     : limit_spd (내부 속도 상한, rad/s)
+  cur <val>     : limit_cur (전류 상한, A)
+  spd_kp <val>  : spd_kp (속도 루프 P gain, 댐핑 역할)
+  spd_ki <val>  : spd_ki (속도 루프 I gain)
+  <숫자>        : 위치 이동 (deg)
+- enable 직전 loc_ref를 현재 위치로 초기화 (튀는 현상 방지)
+- 상위 소프트 램프 유지 (limit_spd와 이중 안전)
  */
 
 #include <iostream>
@@ -45,19 +46,19 @@
 // --- Configuration ---
 const char* CAN_INTERFACE = "can0";
 const int HOST_ID = 0xFD;
-
 const int MOTOR_ID = 127;
 
 const double MAX_SPEED_DEG_PER_SEC = 500.0;
 const double STEP_DEG = 2.0;
 
-// --- CSP 파라미터 기본값 (매뉴얼 4.3.4 참고) ---
-// loc_kp: 위치 루프 P gain. 기본값 40. 클수록 빠르게 추종하지만 진동 위험
-// limit_spd: CSP 내부 속도 상한 (rad/s). 0~33. 안전하게 낮게 시작
-// limit_cur: 속도·위치 모드 전류 상한 (A). 0~16. 토크를 간접 제한
-const float CSP_LOC_KP    = 40.0f;
-const float CSP_LIMIT_SPD = 10.0f;
-const float CSP_LIMIT_CUR = 10.0f;
+// --- CSP 파라미터 초기값 ---
+// 진동이 심하면: loc_kp를 낮추거나, spd_kp를 올리거나, limit_spd를 낮춰
+// 런타임에 / 커맨드로 재컴파일 없이 변경 가능
+const float INIT_LOC_KP    = 15.0f;   // 위치 루프 P gain (기본값 40, 낮게 시작)
+const float INIT_LIMIT_SPD =  5.0f;   // 내부 속도 상한 rad/s (낮을수록 부드럽고 느림)
+const float INIT_LIMIT_CUR = 10.0f;   // 전류 상한 A (토크 간접 제한)
+const float INIT_SPD_KP    = 10.0f;   // 속도 루프 P gain (기본값 6, 댐핑 역할)
+const float INIT_SPD_KI    =  0.01f;  // 속도 루프 I gain (기본값 0.02, 진동 시 낮춤)
 
 // --- CAN Protocol Constants ---
 const uint32_t COMM_ENABLE          = 3;
@@ -66,12 +67,14 @@ const uint32_t COMM_WRITE_PARAMETER = 18;
 const uint32_t COMM_READ_PARAM      = 0x11;
 
 // 파라미터 인덱스 (매뉴얼 4.1.14)
-const uint16_t IDX_RUN_MODE  = 0x7005;  // 0=operation, 1=PP, 2=velocity, 5=CSP
+const uint16_t IDX_RUN_MODE  = 0x7005;
 const uint16_t IDX_LOC_REF   = 0x7016;  // CSP 위치 지령 (rad, float)
 const uint16_t IDX_LIMIT_SPD = 0x7017;  // CSP 속도 상한 (rad/s, float)
 const uint16_t IDX_LIMIT_CUR = 0x7018;  // 전류 상한 (A, float)
+const uint16_t IDX_MECH_POS  = 0x7019;  // 실제 기계각 (float, read-only)
 const uint16_t IDX_LOC_KP    = 0x701E;  // 위치 루프 Kp (float)
-const uint16_t IDX_MECH_POS  = 0x7019;  // 실제 기계각 읽기 (float, read-only)
+const uint16_t IDX_SPD_KP    = 0x701F;  // 속도 루프 Kp (float)
+const uint16_t IDX_SPD_KI    = 0x7020;  // 속도 루프 Ki (float)
 
 const uint8_t RUN_MODE_CSP = 5;
 
@@ -83,9 +86,19 @@ struct MotorState {
     double real_pos;
     bool is_enabled;
 
+    // 현재 적용 중인 파라미터 (모니터 출력용)
+    std::atomic<float> cur_loc_kp;
+    std::atomic<float> cur_limit_spd;
+    std::atomic<float> cur_limit_cur;
+    std::atomic<float> cur_spd_kp;
+    std::atomic<float> cur_spd_ki;
+
     MotorState(int motor_id)
         : id(motor_id), final_target_pos(0.0), current_setpoint(0.0),
-          real_pos(0.0), is_enabled(false) {}
+          real_pos(0.0), is_enabled(false),
+          cur_loc_kp(INIT_LOC_KP), cur_limit_spd(INIT_LIMIT_SPD),
+          cur_limit_cur(INIT_LIMIT_CUR), cur_spd_kp(INIT_SPD_KP),
+          cur_spd_ki(INIT_SPD_KI) {}
 };
 
 MotorState* motor;
@@ -93,8 +106,8 @@ std::atomic<bool> running(true);
 std::atomic<bool> monitor_active(true);
 
 // --- Helper Functions ---
-void pack_float_le(uint8_t* buf, float val)   { memcpy(buf, &val, sizeof(float)); }
-void pack_u16_le(uint8_t* buf, uint16_t val)  { memcpy(buf, &val, sizeof(uint16_t)); }
+void pack_float_le(uint8_t* buf, float val)  { memcpy(buf, &val, sizeof(float)); }
+void pack_u16_le(uint8_t* buf, uint16_t val) { memcpy(buf, &val, sizeof(uint16_t)); }
 
 float unpack_float_le(const uint8_t* buf) {
     float val;
@@ -136,15 +149,13 @@ int getch() {
 
 bool send_frame(int s, uint32_t can_id, const uint8_t* data, uint8_t dlc) {
     struct can_frame frame;
-    frame.can_id = can_id | CAN_EFF_FLAG;
+    frame.can_id  = can_id | CAN_EFF_FLAG;
     frame.can_dlc = dlc;
     if (data) memcpy(frame.data, data, dlc);
     else      memset(frame.data, 0, 8);
     return (write(s, &frame, sizeof(struct can_frame)) == sizeof(struct can_frame));
 }
 
-// --- Type 18: 단일 파라미터 write (float) ---
-// data[0~1]: index LE, data[4~7]: float LE
 bool write_param_float(int s, int motor_id, uint16_t index, float value) {
     uint32_t id = (COMM_WRITE_PARAMETER << 24) | (HOST_ID << 8) | motor_id;
     uint8_t data[8] = {0};
@@ -153,7 +164,6 @@ bool write_param_float(int s, int motor_id, uint16_t index, float value) {
     return send_frame(s, id, data, 8);
 }
 
-// --- Type 18: 단일 파라미터 write (uint8) ---
 bool write_param_uint8(int s, int motor_id, uint16_t index, uint8_t value) {
     uint32_t id = (COMM_WRITE_PARAMETER << 24) | (HOST_ID << 8) | motor_id;
     uint8_t data[8] = {0};
@@ -169,7 +179,6 @@ void send_read_param(int s, int motor_id, uint16_t index) {
     send_frame(s, id, data, 8);
 }
 
-// --- Motor Enable / Stop ---
 bool enable_motor(int s, int motor_id) {
     uint32_t ext_id = (COMM_ENABLE << 24) | (HOST_ID << 8) | motor_id;
     return send_frame(s, ext_id, nullptr, 0);
@@ -180,11 +189,17 @@ bool stop_motor(int s, int motor_id) {
     return send_frame(s, ext_id, nullptr, 0);
 }
 
-// --- CSP 위치 지령 write ---
-// 매 제어 주기마다 loc_ref(rad)만 Type 18로 전송
-// 모터 내부 위치→속도→전류 3단 루프가 나머지를 처리
 bool write_csp_loc_ref(int s, int motor_id, double pos_rad) {
     return write_param_float(s, motor_id, IDX_LOC_REF, (float)pos_rad);
+}
+
+// --- 파라미터 일괄 적용 ---
+void apply_csp_params(int s) {
+    write_param_float(s, motor->id, IDX_LOC_KP,    motor->cur_loc_kp.load());
+    write_param_float(s, motor->id, IDX_LIMIT_SPD,  motor->cur_limit_spd.load());
+    write_param_float(s, motor->id, IDX_LIMIT_CUR,  motor->cur_limit_cur.load());
+    write_param_float(s, motor->id, IDX_SPD_KP,     motor->cur_spd_kp.load());
+    write_param_float(s, motor->id, IDX_SPD_KI,     motor->cur_spd_ki.load());
 }
 
 // --- Control Loop ---
@@ -205,14 +220,12 @@ void control_loop(int s) {
             double current = m->current_setpoint;
             double diff    = target - current;
 
-            // 상위 소프트 램프: 한 주기에 max_step_rad 이상 이동하지 않도록 제한
-            // 모터 내부 limit_spd도 있지만, 상위에서 한 번 더 걸어두면 더 안전
+            // 상위 소프트 램프: 한 주기에 max_step_rad 이상 이동 금지
             if (std::abs(diff) > max_step_rad) {
                 m->current_setpoint += (diff > 0) ? max_step_rad : -max_step_rad;
             } else {
                 m->current_setpoint = target;
             }
-
             write_csp_loc_ref(s, m->id, m->current_setpoint);
         }
 
@@ -233,10 +246,8 @@ void control_loop(int s) {
             if (read(s, &frame, sizeof(struct can_frame)) > 0) {
                 uint32_t type   = (frame.can_id >> 24) & 0x1F;
                 uint32_t src_id = (frame.can_id >> 8) & 0xFF;
-
                 if (type == COMM_READ_PARAM && (uint32_t)motor->id == src_id) {
-                    float val = unpack_float_le(&frame.data[4]);
-                    motor->real_pos = (double)val;
+                    motor->real_pos = (double)unpack_float_le(&frame.data[4]);
                 }
             }
             FD_ZERO(&rdfs);
@@ -246,18 +257,19 @@ void control_loop(int s) {
 
         // 3. Print Status
         if (monitor_active) {
-            std::cout << "\r\033[K[CSP] ";
-
             double tgt_deg = motor->final_target_pos.load() * 180.0 / M_PI;
             double act_deg = motor->real_pos * 180.0 / M_PI;
-            std::string status_color = motor->is_enabled
+            std::string en = motor->is_enabled
                 ? "\033[32mON \033[0m" : "\033[31mOFF\033[0m";
 
-            std::cout << "ID:" << motor->id << " " << status_color
+            std::cout << "\r\033[K[CSP] "
+                      << "ID:" << motor->id << " " << en
                       << " T:" << std::fixed << std::setprecision(1) << std::setw(6) << tgt_deg
                       << " A:" << std::fixed << std::setprecision(1) << std::setw(6) << act_deg
-                      << " | ";
-            std::cout << std::flush;
+                      << "  kp:" << std::setprecision(1) << motor->cur_loc_kp.load()
+                      << " spd:" << motor->cur_limit_spd.load()
+                      << " skp:" << motor->cur_spd_kp.load()
+                      << " | " << std::flush;
         }
 
         auto end     = std::chrono::steady_clock::now();
@@ -298,33 +310,38 @@ int main() {
         return 1;
     }
 
-    // --- Startup Sequence ---
+    // --- Startup ---
     stop_motor(s, motor->id);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    // 1) runmode = 5 (CSP)
-    //    enable 전에 반드시 설정해야 함. enable 후 변경 불가
+    // runmode = 5 (CSP) — enable 전에 반드시 설정
     write_param_uint8(s, motor->id, IDX_RUN_MODE, RUN_MODE_CSP);
-    std::cout << "[INIT] runmode = 5 (CSP)" << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // 2) CSP 파라미터 설정
-    write_param_float(s, motor->id, IDX_LOC_KP,    CSP_LOC_KP);
-    write_param_float(s, motor->id, IDX_LIMIT_SPD,  CSP_LIMIT_SPD);
-    write_param_float(s, motor->id, IDX_LIMIT_CUR,  CSP_LIMIT_CUR);
-    std::cout << "[INIT] loc_kp=" << CSP_LOC_KP
-              << "  limit_spd=" << CSP_LIMIT_SPD << " rad/s"
-              << "  limit_cur=" << CSP_LIMIT_CUR << " A" << std::endl;
+    apply_csp_params(s);
+    std::cout << "[INIT] CSP mode | "
+              << "loc_kp="    << INIT_LOC_KP
+              << "  limit_spd=" << INIT_LIMIT_SPD
+              << "  limit_cur=" << INIT_LIMIT_CUR
+              << "  spd_kp="  << INIT_SPD_KP
+              << "  spd_ki="  << INIT_SPD_KI << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    // 3) 현재 위치 읽기 (enable 전 setpoint 초기화용)
     send_read_param(s, motor->id, IDX_MECH_POS);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     std::thread t(control_loop, s);
 
-    std::cout << "========================================" << std::endl;
-    std::cout << "[MODE] CSP — Space: enable/disable  W/S: +/-  /: deg 입력  Q: 종료" << std::endl;
+    std::cout << "========================================\n"
+              << "Space: enable/disable  W/S: +/-2deg  Q: quit\n"
+              << "/: 커맨드 모드\n"
+              << "  <deg>         위치 이동\n"
+              << "  kp <val>      loc_kp 변경        (현재 " << INIT_LOC_KP << ")\n"
+              << "  spd <val>     limit_spd 변경     (현재 " << INIT_LIMIT_SPD << " rad/s)\n"
+              << "  cur <val>     limit_cur 변경     (현재 " << INIT_LIMIT_CUR << " A)\n"
+              << "  spd_kp <val>  spd_kp 변경 댐핑  (현재 " << INIT_SPD_KP << ")\n"
+              << "  spd_ki <val>  spd_ki 변경        (현재 " << INIT_SPD_KI << ")\n"
+              << "========================================" << std::endl;
 
     set_conio_terminal_mode();
 
@@ -334,51 +351,76 @@ int main() {
         if (kbhit()) {
             int key = getch();
 
-            // 1. Toggle Enable (Space)
+            // Space: enable/disable
             if (key == ' ') {
                 bool to_enable = !motor->is_enabled;
-
                 if (to_enable) {
-                    // enable 직전: setpoint을 현재 실제 위치로 초기화
-                    // 갑자기 튀는 것 방지
-                    motor->current_setpoint  = motor->real_pos;
-                    motor->final_target_pos  = motor->real_pos;
-
-                    // CSP에서는 enable 전에 loc_ref를 현재 위치로 먼저 write
+                    // enable 직전 loc_ref를 현재 위치로 초기화 → 튀는 현상 방지
+                    motor->current_setpoint = motor->real_pos;
+                    motor->final_target_pos = motor->real_pos;
                     write_csp_loc_ref(s, motor->id, motor->real_pos);
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-
                     enable_motor(s, motor->id);
                 } else {
                     stop_motor(s, motor->id);
                 }
                 motor->is_enabled = to_enable;
             }
-            // 2. Quit (Q)
+            // Q: quit
             else if (key == 'q' || key == 'Q') {
                 running = false;
             }
-            // 3. Command Mode (/)
+            // /: command mode
             else if (key == '/') {
                 monitor_active = false;
                 reset_terminal_mode();
 
-                std::cout << "\nCMD (deg) > ";
+                std::cout << "\nCMD > ";
                 std::string line;
                 std::getline(std::cin, line);
 
                 if (!line.empty()) {
                     std::stringstream ss(line);
-                    std::vector<double> inputs;
-                    double temp;
-                    while (ss >> temp) inputs.push_back(temp);
+                    std::string cmd;
+                    ss >> cmd;
 
-                    if (inputs.size() == 1) {
-                        if (motor->is_enabled)
-                            motor->final_target_pos = inputs[0] * M_PI / 180.0;
-                        std::cout << " -> Moved to " << inputs[0] << " deg." << std::endl;
-                    } else {
-                        std::cout << " -> Invalid input." << std::endl;
+                    // 파라미터 변경 커맨드 처리
+                    auto handle_param = [&](const std::string& name,
+                                            uint16_t idx,
+                                            std::atomic<float>& field,
+                                            float lo, float hi) {
+                        float val;
+                        if (ss >> val) {
+                            if (val < lo || val > hi) {
+                                std::cout << " -> 범위 초과 (" << lo << " ~ " << hi << ")" << std::endl;
+                            } else {
+                                field = val;
+                                write_param_float(s, motor->id, idx, val);
+                                std::cout << " -> " << name << " = " << val << " (즉시 적용)" << std::endl;
+                            }
+                        } else {
+                            std::cout << " -> 값을 입력해주세요." << std::endl;
+                        }
+                    };
+
+                    if      (cmd == "kp")     handle_param("loc_kp",    IDX_LOC_KP,    motor->cur_loc_kp,    0.0f, 200.0f);
+                    else if (cmd == "spd")    handle_param("limit_spd", IDX_LIMIT_SPD, motor->cur_limit_spd, 0.1f,  33.0f);
+                    else if (cmd == "cur")    handle_param("limit_cur", IDX_LIMIT_CUR, motor->cur_limit_cur, 0.5f,  16.0f);
+                    else if (cmd == "spd_kp") handle_param("spd_kp",    IDX_SPD_KP,    motor->cur_spd_kp,    0.0f,  50.0f);
+                    else if (cmd == "spd_ki") handle_param("spd_ki",    IDX_SPD_KI,    motor->cur_spd_ki,    0.0f,   5.0f);
+                    else {
+                        // 숫자면 위치 이동
+                        try {
+                            double deg = std::stod(cmd);
+                            if (motor->is_enabled) {
+                                motor->final_target_pos = deg * M_PI / 180.0;
+                                std::cout << " -> " << deg << " deg 이동" << std::endl;
+                            } else {
+                                std::cout << " -> 모터가 비활성 상태 (Space로 enable)" << std::endl;
+                            }
+                        } catch (...) {
+                            std::cout << " -> 알 수 없는 커맨드 (kp/spd/cur/spd_kp/spd_ki/<deg>)" << std::endl;
+                        }
                     }
                 } else {
                     std::cout << " -> Cancelled." << std::endl;
@@ -388,7 +430,7 @@ int main() {
                 set_conio_terminal_mode();
                 monitor_active = true;
             }
-            // 4. Direct Control (W/S)
+            // W/S: direct control
             else if (motor->is_enabled) {
                 if (key == 'w' || key == 'W')
                     motor->final_target_pos = motor->final_target_pos.load() + step_rad;
