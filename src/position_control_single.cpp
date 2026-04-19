@@ -37,7 +37,7 @@ const int HOST_ID = 0xFD;
 
 const int MOTOR_ID = 127;
 
-const double MAX_SPEED_DEG_PER_SEC = 500.0; 
+const double MAX_SPEED_DEG_PER_SEC = 1000.0; 
 const double STEP_DEG = 2.0; 
 
 const double DEFAULT_MIN_LIMIT = -900.0;
@@ -218,7 +218,7 @@ void control_loop(int s) {
         if (loop_count % 5 == 0) {
             send_read_param(s, m->id, IDX_MECH_POS);
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(50)); 
+        //std::this_thread::sleep_for(std::chrono::microseconds(50)); 
         
 
         
@@ -299,7 +299,7 @@ int main() {
     // Startup
     stop_motor(s, motor->id);
     send_read_param(s, motor->id, IDX_MECH_POS);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    //std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     std::thread t(control_loop, s);
 
@@ -359,7 +359,7 @@ int main() {
                     std::cout << " -> Cancelled." << std::endl;
                 }
                 
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 set_conio_terminal_mode(); // Restore Raw Mode
                 monitor_active = true;
             }
